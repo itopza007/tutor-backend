@@ -203,10 +203,12 @@ app.get('/api/registrations', auth, async (req, res) => {
     }
 
     const filterMonth = month || new Date().toISOString().slice(0, 7);
-    params.push(filterMonth);
-    where.push(`$${params.length} = ANY(r.months)`);
+    if (filterMonth) {
+      params.push(filterMonth);
+      where.push(`$${params.length} = ANY(r.months)`);
+    }
 
-    const whereStr = 'WHERE ' + where.join(' AND ');
+    const whereStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const countRes = await pool.query(`SELECT COUNT(*), COALESCE(SUM(r.amount),0) as total_amount FROM registrations r ${whereStr}`, params);
     params.push(limit, offset);
     const data = await pool.query(
