@@ -116,10 +116,23 @@ async function initDB() {
       parent_phone VARCHAR,
       pay_status VARCHAR DEFAULT 'unpaid',
       amount DECIMAL(10,2) DEFAULT 0,
+      paid_amount DECIMAL(10,2) DEFAULT 0,
+      remaining DECIMAL(10,2) DEFAULT 0,
+      paid_at TIMESTAMP,
+      pay_method VARCHAR DEFAULT 'cash',
+      slip_url VARCHAR,
       months TEXT[],
       note TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
+
+    -- เพิ่ม column ถ้ายังไม่มี (สำหรับ database เก่า)
+    ALTER TABLE registrations ADD COLUMN IF NOT EXISTS paid_amount DECIMAL(10,2) DEFAULT 0;
+    ALTER TABLE registrations ADD COLUMN IF NOT EXISTS remaining DECIMAL(10,2) DEFAULT 0;
+    ALTER TABLE registrations ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP;
+    ALTER TABLE registrations ADD COLUMN IF NOT EXISTS pay_method VARCHAR DEFAULT 'cash';
+    ALTER TABLE registrations ADD COLUMN IF NOT EXISTS slip_url VARCHAR;
+
   `);
 
   const exists = await pool.query(`SELECT id FROM users WHERE username = 'admin'`);
@@ -167,21 +180,29 @@ app.get('/api/init', auth, async (req, res) => {
     const todayStr = new Date().toISOString().slice(0, 10);
     const currentMonth = new Date().toISOString().slice(0, 7);
 
-    const [students, summary, attendancesToday] = await Promise.all([
-      pool.query(`SELECT * FROM students WHERE status = 'active' ORDER BY created_at DESC`),
+    const [registrations, summary, attendancesToday] = await Promise.all([
+      // ดึงนักเรียนที่ลงทะเบียนเดือนปัจจุบัน
+      pool.query(`
+        SELECT *, array_length(months, 1) as month_count
+        FROM registrations
+        WHERE $1 = ANY(months)
+        ORDER BY created_at DESC
+      `, [currentMonth]),
       pool.query(`
         SELECT
-          (SELECT COUNT(*) FROM students WHERE status = 'active') as active_students,
-          (SELECT COUNT(*) FROM registrations WHERE $1 = ANY(months)) as monthly_registrations,
-          (SELECT COALESCE(SUM(amount),0) FROM payments WHERE DATE_TRUNC('month', paid_at) = DATE_TRUNC('month', NOW())) as monthly_income
+          (SELECT COUNT(*) FROM registrations WHERE $1 = ANY(months)) as monthly_students,
+          (SELECT COALESCE(SUM(amount),0) FROM registrations WHERE $1 = ANY(months) AND pay_status = 'paid') as monthly_income,
+          (SELECT COUNT(*) FROM registrations WHERE $1 = ANY(months) AND pay_status = 'paid') as paid_count,
+          (SELECT COUNT(*) FROM registrations WHERE $1 = ANY(months) AND pay_status = 'unpaid') as unpaid_count
       `, [currentMonth]),
       pool.query(`SELECT student_id FROM attendances WHERE DATE(attended_at) = $1`, [todayStr]),
     ]);
 
     res.json({
-      students: students.rows,
+      registrations: registrations.rows,
       summary: summary.rows[0],
       attendancesToday: attendancesToday.rows,
+      currentMonth,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -230,7 +251,26 @@ app.post('/api/registrations', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/registrations/:id', auth, async (req, res) => {
+app.post('/api/registrations/:id/pay', auth, async (req, res) => {
+  try {
+    const { paid_amount, pay_method, slip_url, note } = req.body;
+    const reg = await pool.query(`SELECT * FROM registrations WHERE id=$1`, [req.params.id]);
+    if (!reg.rows[0]) return res.status(404).json({ error: 'ไม่พบข้อมูล' });
+
+    const r = reg.rows[0];
+    const totalPaid = parseFloat(r.paid_amount || 0) + parseFloat(paid_amount || 0);
+    const remaining = parseFloat(r.amount || 0) - totalPaid;
+    const pay_status = remaining <= 0 ? 'paid' : 'partial';
+
+    const updated = await pool.query(
+      `UPDATE registrations SET paid_amount=$1, remaining=$2, pay_status=$3, paid_at=NOW(), pay_method=$4, slip_url=$5, note=COALESCE($6, note) WHERE id=$7 RETURNING *`,
+      [totalPaid, Math.max(remaining, 0), pay_status, pay_method || 'cash', slip_url || null, note || null, req.params.id]
+    );
+    res.json(updated.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
   try {
     const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note } = req.body;
     const r = await pool.query(
