@@ -271,6 +271,7 @@ app.post('/api/registrations/:id/pay', auth, async (req, res) => {
 });
 
 
+app.put('/api/registrations/:id', auth, async (req, res) => {
   try {
     const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note } = req.body;
     const r = await pool.query(
