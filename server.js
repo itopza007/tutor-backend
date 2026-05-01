@@ -243,9 +243,10 @@ app.get('/api/registrations', auth, async (req, res) => {
 app.post('/api/registrations', auth, async (req, res) => {
   try {
     const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note } = req.body;
+    const safeAmount = Math.round(parseFloat(amount || 0));
     const r = await pool.query(
       `INSERT INTO registrations (name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [name, nickname, grade, parent_name, parent_phone, pay_status || 'unpaid', amount || 0, months || [], note]
+      [name, nickname, grade, parent_name, parent_phone, pay_status || 'unpaid', safeAmount, months || [], note]
     );
     res.json(r.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -258,8 +259,8 @@ app.post('/api/registrations/:id/pay', auth, async (req, res) => {
     if (!reg.rows[0]) return res.status(404).json({ error: 'ไม่พบข้อมูล' });
 
     const r = reg.rows[0];
-    const totalPaid = parseFloat(r.paid_amount || 0) + parseFloat(paid_amount || 0);
-    const remaining = parseFloat(r.amount || 0) - totalPaid;
+    const totalPaid = Math.round(parseFloat(r.paid_amount || 0) + parseFloat(paid_amount || 0));
+    const remaining = Math.round(parseFloat(r.amount || 0) - totalPaid);
     const pay_status = remaining <= 0 ? 'paid' : 'partial';
 
     const updated = await pool.query(
@@ -274,9 +275,10 @@ app.post('/api/registrations/:id/pay', auth, async (req, res) => {
 app.put('/api/registrations/:id', auth, async (req, res) => {
   try {
     const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note } = req.body;
+    const safeAmount = Math.round(parseFloat(amount || 0));
     const r = await pool.query(
       `UPDATE registrations SET name=$1, nickname=$2, grade=$3, parent_name=$4, parent_phone=$5, pay_status=$6, amount=$7, months=$8, note=$9 WHERE id=$10 RETURNING *`,
-      [name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note, req.params.id]
+      [name, nickname, grade, parent_name, parent_phone, pay_status, safeAmount, months, note, req.params.id]
     );
     res.json(r.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
