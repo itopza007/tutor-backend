@@ -100,13 +100,15 @@ async function initDB() {
     CREATE TABLE IF NOT EXISTS attendances (
       id SERIAL PRIMARY KEY,
       enrollment_id INTEGER REFERENCES enrollments(id),
-      student_id INTEGER REFERENCES students(id),
-      course_id INTEGER REFERENCES courses(id),
+      student_id INTEGER,
+      registration_id INTEGER REFERENCES registrations(id),
+      course_id INTEGER,
       attended_at TIMESTAMP DEFAULT NOW(),
       status VARCHAR DEFAULT 'present',
       note VARCHAR,
       recorded_by VARCHAR
     );
+    ALTER TABLE attendances ADD COLUMN IF NOT EXISTS registration_id INTEGER REFERENCES registrations(id);
     CREATE TABLE IF NOT EXISTS registrations (
       id SERIAL PRIMARY KEY,
       name VARCHAR NOT NULL,
@@ -435,26 +437,32 @@ app.delete('/api/payments/:id', auth, adminOnly, async (req, res) => {
 // ATTENDANCES
 app.get('/api/attendances', auth, async (req, res) => {
   try {
-    const { student_id, date, page = 1, limit = 50 } = req.query;
+    const { registration_id, date, page = 1, limit = 50 } = req.query;
     const offset = (page - 1) * limit;
     let where = []; let params = [];
-    if (student_id) { params.push(student_id); where.push(`a.student_id = $${params.length}`); }
+    if (registration_id) { params.push(registration_id); where.push(`a.registration_id = $${params.length}`); }
     if (date) { params.push(date); where.push(`DATE(a.attended_at) = $${params.length}`); }
     const whereStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const countRes = await pool.query(`SELECT COUNT(*) FROM attendances a ${whereStr}`, params);
     params.push(limit, offset);
-    const data = await pool.query(`SELECT a.*, s.name as student_name, s.nickname FROM attendances a JOIN students s ON a.student_id = s.id ${whereStr} ORDER BY a.attended_at DESC LIMIT $${params.length-1} OFFSET $${params.length}`, params);
+    const data = await pool.query(
+      `SELECT a.*, r.name as student_name, r.nickname
+       FROM attendances a
+       LEFT JOIN registrations r ON a.registration_id = r.id
+       ${whereStr} ORDER BY a.attended_at DESC LIMIT $${params.length-1} OFFSET $${params.length}`,
+      params
+    );
     res.json({ data: data.rows, total: +countRes.rows[0].count, page: +page, limit: +limit });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/attendances', auth, async (req, res) => {
   try {
-    const { enrollment_id, student_id, course_id, status, note } = req.body;
-    const r = await pool.query(`INSERT INTO attendances (enrollment_id, student_id, course_id, status, note, recorded_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`, [enrollment_id, student_id, course_id, status || 'present', note, req.user.name || req.user.username]);
-    if (enrollment_id && status !== 'absent') {
-      await pool.query(`UPDATE enrollments SET sessions_used = sessions_used + 1 WHERE id = $1`, [enrollment_id]);
-    }
+    const { registration_id, student_id, course_id, status, note } = req.body;
+    const r = await pool.query(
+      `INSERT INTO attendances (registration_id, student_id, course_id, status, note, recorded_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [registration_id || null, student_id || null, course_id || null, status || 'present', note, req.user.name || req.user.username]
+    );
     res.json(r.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
