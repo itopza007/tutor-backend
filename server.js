@@ -161,7 +161,32 @@ app.get('/api/summary', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// REGISTRATIONS
+// INIT — โหลดทุกอย่างครั้งเดียว
+app.get('/api/init', auth, async (req, res) => {
+  try {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const currentMonth = new Date().toISOString().slice(0, 7);
+
+    const [students, summary, attendancesToday] = await Promise.all([
+      pool.query(`SELECT * FROM students WHERE status = 'active' ORDER BY created_at DESC`),
+      pool.query(`
+        SELECT
+          (SELECT COUNT(*) FROM students WHERE status = 'active') as active_students,
+          (SELECT COUNT(*) FROM registrations WHERE $1 = ANY(months)) as monthly_registrations,
+          (SELECT COALESCE(SUM(amount),0) FROM payments WHERE DATE_TRUNC('month', paid_at) = DATE_TRUNC('month', NOW())) as monthly_income
+      `, [currentMonth]),
+      pool.query(`SELECT student_id FROM attendances WHERE DATE(attended_at) = $1`, [todayStr]),
+    ]);
+
+    res.json({
+      students: students.rows,
+      summary: summary.rows[0],
+      attendancesToday: attendancesToday.rows,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
 app.get('/api/registrations', auth, async (req, res) => {
   try {
     const { search = '', pay_status = '', month, page = 1, limit = 50 } = req.query;
