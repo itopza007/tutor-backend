@@ -1,0 +1,451 @@
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const { Pool } = require('pg');
+const path = require('path');
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+const JWT_SECRET = process.env.JWT_SECRET || 'krujum-tutor-secret-2024';
+
+// Database
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// Middleware
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(express.json());
+app.use(rateLimit({ windowMs: 60 * 1000, max: 200 }));
+
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://krujumtutor.com',
+  process.env.FRONTEND_URL,
+].filter(Boolean);
+
+app.use(cors({ origin: allowedOrigins, credentials: true }));
+
+// Serve static files (React build)
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ─── Auth Middleware ───────────────────────────────────────────────────────────
+const auth = (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+const adminOnly = (req, res, next) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  next();
+};
+
+// ─── DB Init ───────────────────────────────────────────────────────────────────
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username VARCHAR UNIQUE NOT NULL,
+      password VARCHAR NOT NULL,
+      role VARCHAR DEFAULT 'staff',
+      name VARCHAR,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS students (
+      id SERIAL PRIMARY KEY,
+      student_code VARCHAR UNIQUE NOT NULL,
+      name VARCHAR NOT NULL,
+      nickname VARCHAR,
+      birth_date DATE,
+      phone VARCHAR,
+      parent_name VARCHAR,
+      parent_phone VARCHAR,
+      address TEXT,
+      status VARCHAR DEFAULT 'active',
+      note TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS courses (
+      id SERIAL PRIMARY KEY,
+      course_code VARCHAR UNIQUE NOT NULL,
+      name VARCHAR NOT NULL,
+      subject VARCHAR,
+      level VARCHAR,
+      teacher VARCHAR,
+      price DECIMAL(10,2) DEFAULT 0,
+      sessions_total INTEGER DEFAULT 0,
+      schedule VARCHAR,
+      status VARCHAR DEFAULT 'active',
+      note TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS enrollments (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER REFERENCES students(id),
+      course_id INTEGER REFERENCES courses(id),
+      enrolled_at TIMESTAMP DEFAULT NOW(),
+      sessions_used INTEGER DEFAULT 0,
+      status VARCHAR DEFAULT 'active',
+      note TEXT,
+      UNIQUE(student_id, course_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS payments (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER REFERENCES students(id),
+      course_id INTEGER REFERENCES courses(id),
+      amount DECIMAL(10,2) NOT NULL,
+      paid_at TIMESTAMP DEFAULT NOW(),
+      method VARCHAR DEFAULT 'cash',
+      status VARCHAR DEFAULT 'paid',
+      note VARCHAR,
+      recorded_by VARCHAR
+    );
+
+    CREATE TABLE IF NOT EXISTS attendances (
+      id SERIAL PRIMARY KEY,
+      enrollment_id INTEGER REFERENCES enrollments(id),
+      student_id INTEGER REFERENCES students(id),
+      course_id INTEGER REFERENCES courses(id),
+      attended_at TIMESTAMP DEFAULT NOW(),
+      status VARCHAR DEFAULT 'present',
+      note VARCHAR,
+      recorded_by VARCHAR
+    );
+  `);
+
+  // Default admin
+  const exists = await pool.query(`SELECT id FROM users WHERE username = 'admin'`);
+  if (exists.rows.length === 0) {
+    const hash = await bcrypt.hash('admin1234', 10);
+    await pool.query(`INSERT INTO users (username, password, role, name) VALUES ('admin', $1, 'admin', 'ผู้ดูแลระบบ')`, [hash]);
+  }
+
+  console.log('✅ Database initialized');
+}
+
+// ─── AUTH ──────────────────────────────────────────────────────────────────────
+app.post('/api/login', rateLimit({ windowMs: 60000, max: 10 }), async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const result = await pool.query(`SELECT * FROM users WHERE username = $1`, [username]);
+    const user = result.rows[0];
+    if (!user || !(await bcrypt.compare(password, user.password)))
+      return res.status(401).json({ error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
+    const token = jwt.sign({ id: user.id, username: user.username, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '8h' });
+    res.json({ token, user: { id: user.id, username: user.username, role: user.role, name: user.name } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── SUMMARY ──────────────────────────────────────────────────────────────────
+app.get('/api/summary', auth, async (req, res) => {
+  try {
+    const [students, courses, enrollments, payments, attendances] = await Promise.all([
+      pool.query(`SELECT COUNT(*) FROM students WHERE status = 'active'`),
+      pool.query(`SELECT COUNT(*) FROM courses WHERE status = 'active'`),
+      pool.query(`SELECT COUNT(*) FROM enrollments WHERE status = 'active'`),
+      pool.query(`SELECT COALESCE(SUM(amount),0) as total FROM payments WHERE DATE_TRUNC('month', paid_at) = DATE_TRUNC('month', NOW())`),
+      pool.query(`SELECT COUNT(*) FROM attendances WHERE DATE_TRUNC('month', attended_at) = DATE_TRUNC('month', NOW())`),
+    ]);
+    res.json({
+      active_students: +students.rows[0].count,
+      active_courses: +courses.rows[0].count,
+      active_enrollments: +enrollments.rows[0].count,
+      monthly_income: +payments.rows[0].total,
+      monthly_attendance: +attendances.rows[0].count,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── STUDENTS ─────────────────────────────────────────────────────────────────
+app.get('/api/students', auth, async (req, res) => {
+  try {
+    const { search = '', status = '', page = 1, limit = 40 } = req.query;
+    const offset = (page - 1) * limit;
+    let where = [];
+    let params = [];
+    if (search) { params.push(`%${search}%`); where.push(`(s.name ILIKE $${params.length} OR s.nickname ILIKE $${params.length} OR s.student_code ILIKE $${params.length} OR s.phone ILIKE $${params.length} OR s.parent_phone ILIKE $${params.length})`); }
+    if (status) { params.push(status); where.push(`s.status = $${params.length}`); }
+    const whereStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const countRes = await pool.query(`SELECT COUNT(*) FROM students s ${whereStr}`, params);
+    params.push(limit, offset);
+    const data = await pool.query(`SELECT s.*, (SELECT COUNT(*) FROM enrollments e WHERE e.student_id = s.id AND e.status='active') as active_courses FROM students s ${whereStr} ORDER BY s.created_at DESC LIMIT $${params.length-1} OFFSET $${params.length}`, params);
+    res.json({ data: data.rows, total: +countRes.rows[0].count, page: +page, limit: +limit });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/students', auth, adminOnly, async (req, res) => {
+  try {
+    const { student_code, name, nickname, birth_date, phone, parent_name, parent_phone, address, note } = req.body;
+    const r = await pool.query(
+      `INSERT INTO students (student_code, name, nickname, birth_date, phone, parent_name, parent_phone, address, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [student_code, name, nickname, birth_date || null, phone, parent_name, parent_phone, address, note]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/students/:id', auth, adminOnly, async (req, res) => {
+  try {
+    const { name, nickname, birth_date, phone, parent_name, parent_phone, address, status, note } = req.body;
+    const r = await pool.query(
+      `UPDATE students SET name=$1, nickname=$2, birth_date=$3, phone=$4, parent_name=$5, parent_phone=$6, address=$7, status=$8, note=$9 WHERE id=$10 RETURNING *`,
+      [name, nickname, birth_date || null, phone, parent_name, parent_phone, address, status, note, req.params.id]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/students/:id', auth, adminOnly, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM students WHERE id=$1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── COURSES ──────────────────────────────────────────────────────────────────
+app.get('/api/courses', auth, async (req, res) => {
+  try {
+    const { search = '', status = '', page = 1, limit = 40 } = req.query;
+    const offset = (page - 1) * limit;
+    let where = []; let params = [];
+    if (search) { params.push(`%${search}%`); where.push(`(c.name ILIKE $${params.length} OR c.course_code ILIKE $${params.length} OR c.subject ILIKE $${params.length} OR c.teacher ILIKE $${params.length})`); }
+    if (status) { params.push(status); where.push(`c.status = $${params.length}`); }
+    const whereStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const countRes = await pool.query(`SELECT COUNT(*) FROM courses c ${whereStr}`, params);
+    params.push(limit, offset);
+    const data = await pool.query(`SELECT c.*, (SELECT COUNT(*) FROM enrollments e WHERE e.course_id = c.id AND e.status='active') as enrolled_count FROM courses c ${whereStr} ORDER BY c.created_at DESC LIMIT $${params.length-1} OFFSET $${params.length}`, params);
+    res.json({ data: data.rows, total: +countRes.rows[0].count, page: +page, limit: +limit });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/courses', auth, adminOnly, async (req, res) => {
+  try {
+    const { course_code, name, subject, level, teacher, price, sessions_total, schedule, note } = req.body;
+    const r = await pool.query(
+      `INSERT INTO courses (course_code, name, subject, level, teacher, price, sessions_total, schedule, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [course_code, name, subject, level, teacher, price || 0, sessions_total || 0, schedule, note]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/courses/:id', auth, adminOnly, async (req, res) => {
+  try {
+    const { name, subject, level, teacher, price, sessions_total, schedule, status, note } = req.body;
+    const r = await pool.query(
+      `UPDATE courses SET name=$1, subject=$2, level=$3, teacher=$4, price=$5, sessions_total=$6, schedule=$7, status=$8, note=$9 WHERE id=$10 RETURNING *`,
+      [name, subject, level, teacher, price, sessions_total, schedule, status, note, req.params.id]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/courses/:id', auth, adminOnly, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM courses WHERE id=$1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── ENROLLMENTS ──────────────────────────────────────────────────────────────
+app.get('/api/enrollments', auth, async (req, res) => {
+  try {
+    const { student_id, course_id, status = '', page = 1, limit = 40 } = req.query;
+    const offset = (page - 1) * limit;
+    let where = []; let params = [];
+    if (student_id) { params.push(student_id); where.push(`e.student_id = $${params.length}`); }
+    if (course_id) { params.push(course_id); where.push(`e.course_id = $${params.length}`); }
+    if (status) { params.push(status); where.push(`e.status = $${params.length}`); }
+    const whereStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const countRes = await pool.query(`SELECT COUNT(*) FROM enrollments e ${whereStr}`, params);
+    params.push(limit, offset);
+    const data = await pool.query(`
+      SELECT e.*, s.name as student_name, s.student_code, s.nickname, c.name as course_name, c.course_code, c.subject, c.sessions_total, c.price
+      FROM enrollments e
+      JOIN students s ON e.student_id = s.id
+      JOIN courses c ON e.course_id = c.id
+      ${whereStr} ORDER BY e.enrolled_at DESC LIMIT $${params.length-1} OFFSET $${params.length}
+    `, params);
+    res.json({ data: data.rows, total: +countRes.rows[0].count, page: +page, limit: +limit });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/enrollments', auth, adminOnly, async (req, res) => {
+  try {
+    const { student_id, course_id, note } = req.body;
+    const r = await pool.query(
+      `INSERT INTO enrollments (student_id, course_id, note) VALUES ($1,$2,$3) ON CONFLICT (student_id, course_id) DO NOTHING RETURNING *`,
+      [student_id, course_id, note]
+    );
+    res.json(r.rows[0] || { error: 'นักเรียนลงทะเบียนคอร์สนี้แล้ว' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/enrollments/:id', auth, adminOnly, async (req, res) => {
+  try {
+    const { status, sessions_used, note } = req.body;
+    const r = await pool.query(
+      `UPDATE enrollments SET status=$1, sessions_used=$2, note=$3 WHERE id=$4 RETURNING *`,
+      [status, sessions_used, note, req.params.id]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/enrollments/:id', auth, adminOnly, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM enrollments WHERE id=$1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── PAYMENTS ─────────────────────────────────────────────────────────────────
+app.get('/api/payments', auth, async (req, res) => {
+  try {
+    const { student_id, course_id, month, page = 1, limit = 30 } = req.query;
+    const offset = (page - 1) * limit;
+    let where = []; let params = [];
+    if (student_id) { params.push(student_id); where.push(`p.student_id = $${params.length}`); }
+    if (course_id) { params.push(course_id); where.push(`p.course_id = $${params.length}`); }
+    if (month) { params.push(month); where.push(`TO_CHAR(p.paid_at, 'YYYY-MM') = $${params.length}`); }
+    const whereStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const countRes = await pool.query(`SELECT COUNT(*), COALESCE(SUM(amount),0) as total FROM payments p ${whereStr}`, params);
+    params.push(limit, offset);
+    const data = await pool.query(`
+      SELECT p.*, s.name as student_name, s.student_code, c.name as course_name, c.course_code
+      FROM payments p
+      JOIN students s ON p.student_id = s.id
+      LEFT JOIN courses c ON p.course_id = c.id
+      ${whereStr} ORDER BY p.paid_at DESC LIMIT $${params.length-1} OFFSET $${params.length}
+    `, params);
+    res.json({ data: data.rows, total: +countRes.rows[0].count, sum: +countRes.rows[0].total, page: +page, limit: +limit });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/payments', auth, async (req, res) => {
+  try {
+    const { student_id, course_id, amount, method, note } = req.body;
+    const r = await pool.query(
+      `INSERT INTO payments (student_id, course_id, amount, method, note, recorded_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [student_id, course_id || null, amount, method || 'cash', note, req.user.name || req.user.username]
+    );
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/payments/:id', auth, adminOnly, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM payments WHERE id=$1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── ATTENDANCES ──────────────────────────────────────────────────────────────
+app.get('/api/attendances', auth, async (req, res) => {
+  try {
+    const { course_id, student_id, date, page = 1, limit = 50 } = req.query;
+    const offset = (page - 1) * limit;
+    let where = []; let params = [];
+    if (course_id) { params.push(course_id); where.push(`a.course_id = $${params.length}`); }
+    if (student_id) { params.push(student_id); where.push(`a.student_id = $${params.length}`); }
+    if (date) { params.push(date); where.push(`DATE(a.attended_at) = $${params.length}`); }
+    const whereStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const countRes = await pool.query(`SELECT COUNT(*) FROM attendances a ${whereStr}`, params);
+    params.push(limit, offset);
+    const data = await pool.query(`
+      SELECT a.*, s.name as student_name, s.nickname, c.name as course_name, c.subject
+      FROM attendances a
+      JOIN students s ON a.student_id = s.id
+      JOIN courses c ON a.course_id = c.id
+      ${whereStr} ORDER BY a.attended_at DESC LIMIT $${params.length-1} OFFSET $${params.length}
+    `, params);
+    res.json({ data: data.rows, total: +countRes.rows[0].count, page: +page, limit: +limit });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/attendances', auth, async (req, res) => {
+  try {
+    const { enrollment_id, student_id, course_id, status, note } = req.body;
+    const r = await pool.query(
+      `INSERT INTO attendances (enrollment_id, student_id, course_id, status, note, recorded_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [enrollment_id, student_id, course_id, status || 'present', note, req.user.name || req.user.username]
+    );
+    // increment sessions_used
+    if (enrollment_id && status !== 'absent') {
+      await pool.query(`UPDATE enrollments SET sessions_used = sessions_used + 1 WHERE id = $1`, [enrollment_id]);
+    }
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/attendances/:id', auth, adminOnly, async (req, res) => {
+  try {
+    const att = await pool.query(`SELECT * FROM attendances WHERE id=$1`, [req.params.id]);
+    if (att.rows[0]?.enrollment_id && att.rows[0]?.status !== 'absent') {
+      await pool.query(`UPDATE enrollments SET sessions_used = GREATEST(sessions_used - 1, 0) WHERE id = $1`, [att.rows[0].enrollment_id]);
+    }
+    await pool.query(`DELETE FROM attendances WHERE id=$1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── USERS ────────────────────────────────────────────────────────────────────
+app.get('/api/users', auth, adminOnly, async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT id, username, role, name, created_at FROM users ORDER BY created_at`);
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/users', auth, adminOnly, async (req, res) => {
+  try {
+    const { username, password, role, name } = req.body;
+    const hash = await bcrypt.hash(password, 10);
+    const r = await pool.query(`INSERT INTO users (username, password, role, name) VALUES ($1,$2,$3,$4) RETURNING id, username, role, name`, [username, hash, role || 'staff', name]);
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/users/:id', auth, adminOnly, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM users WHERE id=$1 AND username != 'admin'`, [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/users/:id/password', auth, async (req, res) => {
+  try {
+    const { old_password, new_password } = req.body;
+    const userRes = await pool.query(`SELECT * FROM users WHERE id=$1`, [req.params.id]);
+    const user = userRes.rows[0];
+    if (!user || !(await bcrypt.compare(old_password, user.password)))
+      return res.status(401).json({ error: 'รหัสผ่านเดิมไม่ถูกต้อง' });
+    const hash = await bcrypt.hash(new_password, 10);
+    await pool.query(`UPDATE users SET password=$1 WHERE id=$2`, [hash, req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// SPA fallback
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+initDB().then(() => {
+  app.listen(PORT, () => console.log(`🚀 Krujum Tutor API running on port ${PORT}`));
+});
