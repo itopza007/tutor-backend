@@ -247,8 +247,8 @@ app.post('/api/registrations', auth, async (req, res) => {
     const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note } = req.body;
     const safeAmount = Math.round(parseFloat(amount || 0));
     const r = await pool.query(
-      `INSERT INTO registrations (name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [name, nickname, grade, parent_name, parent_phone, pay_status || 'unpaid', safeAmount, months || [], note]
+      `INSERT INTO registrations (name, nickname, grade, parent_name, parent_phone, pay_status, amount, paid_amount, remaining, months, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [name, nickname, grade, parent_name, parent_phone, pay_status || 'unpaid', safeAmount, 0, safeAmount, months || [], note]
     );
     res.json(r.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -261,13 +261,19 @@ app.post('/api/registrations/:id/pay', auth, async (req, res) => {
     if (!reg.rows[0]) return res.status(404).json({ error: 'ไม่พบข้อมูล' });
 
     const r = reg.rows[0];
-    const totalPaid = Math.round(parseFloat(r.paid_amount || 0) + parseFloat(paid_amount || 0));
-    const remaining = Math.round(parseFloat(r.amount || 0) - totalPaid);
-    const pay_status = remaining <= 0 ? 'paid' : 'partial';
+    const originalAmount = Math.round(parseFloat(r.amount || 0));
+    const prevPaid = Math.round(parseFloat(r.paid_amount || 0));
+    const newPayment = Math.round(parseFloat(paid_amount || 0));
+
+    if (newPayment <= 0) return res.status(400).json({ error: 'จำนวนเงินต้องมากกว่า 0' });
+
+    const totalPaid = prevPaid + newPayment;
+    const remaining = Math.max(originalAmount - totalPaid, 0);
+    const pay_status = remaining === 0 ? 'paid' : 'partial';
 
     const updated = await pool.query(
       `UPDATE registrations SET paid_amount=$1, remaining=$2, pay_status=$3, paid_at=NOW(), pay_method=$4, slip_url=$5, note=COALESCE($6, note) WHERE id=$7 RETURNING *`,
-      [totalPaid, Math.max(remaining, 0), pay_status, pay_method || 'cash', slip_url || null, note || null, req.params.id]
+      [totalPaid, remaining, pay_status, pay_method || 'cash', slip_url || null, note || null, req.params.id]
     );
     res.json(updated.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -278,9 +284,16 @@ app.put('/api/registrations/:id', auth, async (req, res) => {
   try {
     const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note } = req.body;
     const safeAmount = Math.round(parseFloat(amount || 0));
+
+    // ดึง paid_amount เดิมมา recalculate remaining
+    const existing = await pool.query(`SELECT paid_amount FROM registrations WHERE id=$1`, [req.params.id]);
+    const prevPaid = Math.round(parseFloat(existing.rows[0]?.paid_amount || 0));
+    const newRemaining = Math.max(safeAmount - prevPaid, 0);
+    const newPayStatus = pay_status || (newRemaining === 0 && prevPaid > 0 ? 'paid' : prevPaid > 0 ? 'partial' : 'unpaid');
+
     const r = await pool.query(
-      `UPDATE registrations SET name=$1, nickname=$2, grade=$3, parent_name=$4, parent_phone=$5, pay_status=$6, amount=$7, months=$8, note=$9 WHERE id=$10 RETURNING *`,
-      [name, nickname, grade, parent_name, parent_phone, pay_status, safeAmount, months, note, req.params.id]
+      `UPDATE registrations SET name=$1, nickname=$2, grade=$3, parent_name=$4, parent_phone=$5, pay_status=$6, amount=$7, remaining=$8, months=$9, note=$10 WHERE id=$11 RETURNING *`,
+      [name, nickname, grade, parent_name, parent_phone, newPayStatus, safeAmount, newRemaining, months, note, req.params.id]
     );
     res.json(r.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
