@@ -317,7 +317,7 @@ app.delete('/api/payment-history/:id', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-
+app.put('/api/registrations/:id', auth, async (req, res) => {
   try {
     const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note } = req.body;
     const safeAmount = Math.round(parseFloat(amount || 0));
