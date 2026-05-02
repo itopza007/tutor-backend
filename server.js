@@ -125,16 +125,17 @@ async function initDB() {
       pay_method VARCHAR DEFAULT 'cash',
       slip_url VARCHAR,
       months TEXT[],
+      study_days TEXT[],
       note TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
 
-    -- เพิ่ม column ถ้ายังไม่มี (สำหรับ database เก่า)
     ALTER TABLE registrations ADD COLUMN IF NOT EXISTS paid_amount DECIMAL(10,2) DEFAULT 0;
     ALTER TABLE registrations ADD COLUMN IF NOT EXISTS remaining DECIMAL(10,2) DEFAULT 0;
     ALTER TABLE registrations ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP;
     ALTER TABLE registrations ADD COLUMN IF NOT EXISTS pay_method VARCHAR DEFAULT 'cash';
     ALTER TABLE registrations ADD COLUMN IF NOT EXISTS slip_url VARCHAR;
+    ALTER TABLE registrations ADD COLUMN IF NOT EXISTS study_days TEXT[];
 
     CREATE TABLE IF NOT EXISTS payment_history (
       id SERIAL PRIMARY KEY,
@@ -255,11 +256,11 @@ app.get('/api/registrations', auth, async (req, res) => {
 
 app.post('/api/registrations', auth, async (req, res) => {
   try {
-    const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note } = req.body;
+    const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, study_days, note } = req.body;
     const safeAmount = Math.round(parseFloat(amount || 0));
     const r = await pool.query(
-      `INSERT INTO registrations (name, nickname, grade, parent_name, parent_phone, pay_status, amount, paid_amount, remaining, months, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [name, nickname, grade, parent_name, parent_phone, pay_status || 'unpaid', safeAmount, 0, safeAmount, months || [], note]
+      `INSERT INTO registrations (name, nickname, grade, parent_name, parent_phone, pay_status, amount, paid_amount, remaining, months, study_days, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [name, nickname, grade, parent_name, parent_phone, pay_status || 'unpaid', safeAmount, 0, safeAmount, months || [], study_days || [], note]
     );
     res.json(r.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -356,18 +357,17 @@ app.delete('/api/payment-history/:id', auth, async (req, res) => {
 
 app.put('/api/registrations/:id', auth, async (req, res) => {
   try {
-    const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note } = req.body;
+    const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, study_days, note } = req.body;
     const safeAmount = Math.round(parseFloat(amount || 0));
 
-    // ดึง paid_amount เดิมมา recalculate remaining
     const existing = await pool.query(`SELECT paid_amount FROM registrations WHERE id=$1`, [req.params.id]);
     const prevPaid = Math.round(parseFloat(existing.rows[0]?.paid_amount || 0));
     const newRemaining = Math.max(safeAmount - prevPaid, 0);
     const newPayStatus = pay_status || (newRemaining === 0 && prevPaid > 0 ? 'paid' : prevPaid > 0 ? 'partial' : 'unpaid');
 
     const r = await pool.query(
-      `UPDATE registrations SET name=$1, nickname=$2, grade=$3, parent_name=$4, parent_phone=$5, pay_status=$6, amount=$7, remaining=$8, months=$9, note=$10 WHERE id=$11 RETURNING *`,
-      [name, nickname, grade, parent_name, parent_phone, newPayStatus, safeAmount, newRemaining, months, note, req.params.id]
+      `UPDATE registrations SET name=$1, nickname=$2, grade=$3, parent_name=$4, parent_phone=$5, pay_status=$6, amount=$7, remaining=$8, months=$9, study_days=$10, note=$11 WHERE id=$12 RETURNING *`,
+      [name, nickname, grade, parent_name, parent_phone, newPayStatus, safeAmount, newRemaining, months, study_days || [], note, req.params.id]
     );
     res.json(r.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }

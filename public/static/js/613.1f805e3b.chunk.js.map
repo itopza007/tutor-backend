@@ -1,0 +1,1 @@
+{"version":3,"file":"static/js/613.1f805e3b.chunk.js","mappings":"yGAAAA,EAAOC,QAAUC,OAAO,sE","sources":["../external module \"https:/cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js\""],"sourcesContent":["module.exports = import(\"https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js\");;"],"names":["module","exports","import"],"sourceRoot":""}
