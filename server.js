@@ -14,7 +14,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'krujum-tutor-secret-2024';
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(rateLimit({ windowMs: 60 * 1000, max: 200 }));
 
 const allowedOrigins = [
