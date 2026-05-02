@@ -288,18 +288,55 @@ app.post('/api/registrations/:id/pay', auth, async (req, res) => {
       [totalPaid, remaining, pay_status, pay_method || 'cash', slip_url || null, note || null, req.params.id]
     );
 
-    // บันทึกประวัติทุกครั้ง
-    await pool.query(
-      `INSERT INTO payment_history (registration_id, amount, pay_method, slip_url, note, recorded_by) VALUES ($1,$2,$3,$4,$5,$6)`,
+    // บันทึกประวัติทุกครั้ง และรับ id กลับมาเป็นเลขที่ใบเสร็จ
+    const historyRow = await pool.query(
+      `INSERT INTO payment_history (registration_id, amount, pay_method, slip_url, note, recorded_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
       [req.params.id, newPayment, pay_method || 'cash', slip_url || null, note || null, req.user.name || req.user.username]
     );
+    const receiptId = historyRow.rows[0].id;
 
-    res.json(updated.rows[0]);
+    res.json({ ...updated.rows[0], receipt_id: receiptId });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 
 // PAYMENT HISTORY
+app.get('/api/payment-history-by-id/:id', auth, async (req, res) => {
+  try {
+    const h = await pool.query(
+      `SELECT ph.*, r.name, r.nickname, r.grade, r.amount as reg_amount, r.paid_amount, r.remaining, r.pay_status
+       FROM payment_history ph
+       JOIN registrations r ON ph.registration_id = r.id
+       WHERE ph.id = $1`,
+      [req.params.id]
+    );
+    if (!h.rows[0]) return res.status(404).json({ error: 'ไม่พบใบเสร็จ' });
+    const row = h.rows[0];
+    res.json({
+      history: {
+        id: row.id,
+        registration_id: row.registration_id,
+        amount: row.amount,
+        pay_method: row.pay_method,
+        slip_url: row.slip_url,
+        note: row.note,
+        recorded_by: row.recorded_by,
+        paid_at: row.paid_at,
+      },
+      reg: {
+        id: row.registration_id,
+        name: row.name,
+        nickname: row.nickname,
+        grade: row.grade,
+        amount: row.reg_amount,
+        paid_amount: row.paid_amount,
+        remaining: row.remaining,
+        pay_status: row.pay_status,
+      }
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/payment-history/:registration_id', auth, async (req, res) => {
   try {
     const r = await pool.query(
