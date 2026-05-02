@@ -1,0 +1,2 @@
+"use strict";(globalThis.webpackChunktutor_app=globalThis.webpackChunktutor_app||[]).push([[864],{864(a){a.exports=import("https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.esm.min.js")}}]);
+//# sourceMappingURL=864.2fe071b4.chunk.js.map
