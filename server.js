@@ -136,6 +136,16 @@ async function initDB() {
     ALTER TABLE registrations ADD COLUMN IF NOT EXISTS pay_method VARCHAR DEFAULT 'cash';
     ALTER TABLE registrations ADD COLUMN IF NOT EXISTS slip_url VARCHAR;
 
+    CREATE TABLE IF NOT EXISTS payment_history (
+      id SERIAL PRIMARY KEY,
+      registration_id INTEGER REFERENCES registrations(id) ON DELETE CASCADE,
+      amount INTEGER NOT NULL,
+      pay_method VARCHAR DEFAULT 'cash',
+      slip_url TEXT,
+      note TEXT,
+      recorded_by VARCHAR,
+      paid_at TIMESTAMP DEFAULT NOW()
+    );
   `);
 
   const exists = await pool.query(`SELECT id FROM users WHERE username = 'admin'`);
@@ -272,16 +282,42 @@ app.post('/api/registrations/:id/pay', auth, async (req, res) => {
     const remaining = Math.max(originalAmount - totalPaid, 0);
     const pay_status = remaining === 0 ? 'paid' : 'partial';
 
+    // อัปเดต registrations
     const updated = await pool.query(
       `UPDATE registrations SET paid_amount=$1, remaining=$2, pay_status=$3, paid_at=NOW(), pay_method=$4, slip_url=$5, note=COALESCE($6, note) WHERE id=$7 RETURNING *`,
       [totalPaid, remaining, pay_status, pay_method || 'cash', slip_url || null, note || null, req.params.id]
     );
+
+    // บันทึกประวัติทุกครั้ง
+    await pool.query(
+      `INSERT INTO payment_history (registration_id, amount, pay_method, slip_url, note, recorded_by) VALUES ($1,$2,$3,$4,$5,$6)`,
+      [req.params.id, newPayment, pay_method || 'cash', slip_url || null, note || null, req.user.name || req.user.username]
+    );
+
     res.json(updated.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 
-app.put('/api/registrations/:id', auth, async (req, res) => {
+// PAYMENT HISTORY
+app.get('/api/payment-history/:registration_id', auth, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT * FROM payment_history WHERE registration_id=$1 ORDER BY paid_at ASC`,
+      [req.params.registration_id]
+    );
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/payment-history/:id', auth, async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM payment_history WHERE id=$1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
   try {
     const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, note } = req.body;
     const safeAmount = Math.round(parseFloat(amount || 0));
