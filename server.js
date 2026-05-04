@@ -375,8 +375,29 @@ app.put('/api/registrations/:id', auth, async (req, res) => {
 
 app.delete('/api/registrations/:id', auth, adminOnly, async (req, res) => {
   try {
+    // ลบ attendances ที่เชื่อมกับ registration นี้ก่อน
+    await pool.query(`DELETE FROM attendances WHERE registration_id=$1`, [req.params.id]);
+    // ลบ payment_history ที่เชื่อมกับ registration นี้ด้วย
+    await pool.query(`DELETE FROM payment_history WHERE registration_id=$1`, [req.params.id]);
     await pool.query(`DELETE FROM registrations WHERE id=$1`, [req.params.id]);
     res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Bulk delete registrations by month
+app.delete('/api/registrations', auth, adminOnly, async (req, res) => {
+  try {
+    const { month } = req.query;
+    if (!month) return res.status(400).json({ error: 'month required' });
+    // หา registration ids ของเดือนนั้น
+    const regs = await pool.query(`SELECT id FROM registrations WHERE $1 = ANY(months)`, [month]);
+    const ids = regs.rows.map(r => r.id);
+    if (ids.length > 0) {
+      await pool.query(`DELETE FROM attendances WHERE registration_id = ANY($1)`, [ids]);
+      await pool.query(`DELETE FROM payment_history WHERE registration_id = ANY($1)`, [ids]);
+      await pool.query(`DELETE FROM registrations WHERE id = ANY($1)`, [ids]);
+    }
+    res.json({ success: true, deleted: ids.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
