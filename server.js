@@ -257,7 +257,7 @@ app.get('/api/registrations', auth, async (req, res) => {
 app.post('/api/registrations', auth, async (req, res) => {
   try {
     const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, study_days, note } = req.body;
-    const safeAmount = Math.round(parseFloat(amount || 0));
+    const safeAmount = parseInt(amount || 0, 10);
     const r = await pool.query(
       `INSERT INTO registrations (name, nickname, grade, parent_name, parent_phone, pay_status, amount, paid_amount, remaining, months, study_days, note) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [name, nickname, grade, parent_name, parent_phone, pay_status || 'unpaid', safeAmount, 0, safeAmount, months || [], study_days || [], note]
@@ -358,10 +358,10 @@ app.delete('/api/payment-history/:id', auth, async (req, res) => {
 app.put('/api/registrations/:id', auth, async (req, res) => {
   try {
     const { name, nickname, grade, parent_name, parent_phone, pay_status, amount, months, study_days, note } = req.body;
-    const safeAmount = Math.round(parseFloat(amount || 0));
+    const safeAmount = parseInt(amount || 0, 10);
 
     const existing = await pool.query(`SELECT paid_amount FROM registrations WHERE id=$1`, [req.params.id]);
-    const prevPaid = Math.round(parseFloat(existing.rows[0]?.paid_amount || 0));
+    const prevPaid = parseInt(existing.rows[0]?.paid_amount || 0, 10);
     const newRemaining = Math.max(safeAmount - prevPaid, 0);
     const newPayStatus = pay_status || (newRemaining === 0 && prevPaid > 0 ? 'paid' : prevPaid > 0 ? 'partial' : 'unpaid');
 
